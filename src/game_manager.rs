@@ -8,18 +8,15 @@ use serde::{Serialize, Deserialize};
 /// Messages that can be sent to the game manager
 #[derive(Debug, Clone)]
 pub enum GameManagerMessage {
-    /// Create a new game
     CreateGame {
         creator: Player,
         initial_purse: u64,
         response_tx: mpsc::UnboundedSender<String>, // game_id
     },
-    /// Start a game
     StartGame {
         game_id: String,
         response_tx: mpsc::UnboundedSender<Result<(), String>>,
     },
-    /// Place a bid in a game
     PlaceBid {
         game_id: String,
         player: Player,
@@ -27,28 +24,23 @@ pub enum GameManagerMessage {
         price: u64,
         response_tx: mpsc::UnboundedSender<Result<(), String>>,
     },
-    /// Sell the current cricketer (end current auction)
     SellCricketer {
         game_id: String,
         response_tx: mpsc::UnboundedSender<Result<(), String>>,
     },
-    /// End a game
     EndGame {
         game_id: String,
         response_tx: mpsc::UnboundedSender<Result<Player, String>>,
     },
-    /// Remove a player from a game
     RemovePlayer {
         game_id: String,
         player: Player,
         response_tx: mpsc::UnboundedSender<Result<(), String>>,
     },
-    /// Get game status/info
     GetGameInfo {
         game_id: String,
         response_tx: mpsc::UnboundedSender<Option<GameInfo>>,
     },
-    /// List all games
     ListGames {
         response_tx: mpsc::UnboundedSender<Vec<GameInfo>>,
     },
@@ -235,11 +227,6 @@ impl GameManager {
     async fn list_games(&self) -> Vec<GameInfo> {
         let games = self.games.lock().await;
         games.values().map(|game| game.get_info()).collect()
-    }
-
-    async fn get_all_games(&self) -> Vec<Game> {
-        let games = self.games.lock().await;
-        games.values().cloned().collect()
     }
 }
 
