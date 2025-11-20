@@ -1,3 +1,4 @@
+#[derive(Clone)]
 pub struct Player{
     username: String,
     password: String,
@@ -13,6 +14,10 @@ impl Player{
             email,
             coins: 0
         }
+    }
+
+    pub fn username(&self) -> &String {
+        &self.username
     }
 
     pub fn join_game(mut game: Game){

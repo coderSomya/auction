@@ -2,6 +2,7 @@ use crate::player::Player;
 use std::collections::HashMap;
 use std::vec::Vec;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 
 
 const MAX_IDLE_TIME_IN_SECS: u64 = 1*60; // 1 min
@@ -18,6 +19,7 @@ struct Buy{
     price: u64
 }
 
+#[derive(Clone)]
 struct Bid{
     // for whom the bid is going on
     cricketer: String,
@@ -31,32 +33,31 @@ struct Bid{
 
 struct GameState{
     // player -> {cricketer, price}
-    teams: HashMap<String, Vec<Buy>>,
-    // cricketer, price, option<player>
-    current_bid: Option<(String, u64, Option<Player>)>
+    teams: Mutex<HashMap<String, Vec<Buy>>>,
+    // current bid for the cricketer being auctioned
+    current_bid: Mutex<Option<Bid>>
 }
 
 impl GameState{
     pub fn new() -> Self{
         Self{
-            teams: HashMap::new(),
-            current_bid: None
+            teams: Mutex::new(HashMap::new()),
+            current_bid: Mutex::new(None)
         }
     }
 
-    pub fn add_cricketer_to_a_team(&mut self, player: String, cricketer: String, price: u64){
+    pub async fn add_cricketer_to_a_team(&self, player: String, cricketer: String, price: u64){
         let buy = Buy{
             cricketer,
             price
         };
 
-        let mut buys_of_this_player = self.teams.get(&player);
-        if let Some(buys_of_this_player) = buys_of_this_player{
+        let mut teams = self.teams.lock().await;
+        if let Some(buys_of_this_player) = teams.get_mut(&player){
             buys_of_this_player.push(buy);
         }else{
-            buys_of_this_player = Vec::new();
+            teams.insert(player, vec![buy]);
         }
-        self.teams.insert(player, buys_of_this_player);
     }
 
 }
@@ -95,32 +96,40 @@ impl Game{
         winner
     }
 
-    fn update_bid(&mut self, bid: Bid){
-        self.state.current_bid = bid;
+    async fn update_bid(&self, bid: Bid){
+        let mut current_bid = self.state.current_bid.lock().await;
+        *current_bid = Some(bid);
     }
 
-    pub fn try_update_bid(&mut self, bid: Bid){
-        if self.is_bid_valid(bid) {
-            update_bid(bid);
+    pub async fn try_update_bid(&self, bid: Bid){
+        if self.is_bid_valid(bid.clone()).await {
+            self.update_bid(bid).await;
         }
     }
 
-    pub fn sell(&mut self) -> Result<(), String>{
-        match self.state.current_bid{
+    pub async fn sell(&self) -> Result<(), String>{
+        let mut current_bid = self.state.current_bid.lock().await;
+        match current_bid.take(){
             Some(bid) => {
-                self.state.add_cricketer_to_a_team(bid.player, bid.cricketer, bid.price);
+                drop(current_bid); // Release the lock before calling another async function
+                self.state.add_cricketer_to_a_team(bid.player.username().clone(), bid.cricketer, bid.price).await;
+                Ok(())
             },
             None => {
-                Err("cannot sell with no current bids".to_string());
+                Err("cannot sell with no current bids".to_string())
             }
         }
-
-        self.state.current_bid = None;
-
-        Ok(())
     }
 
-    pub fn is_bid_valid(&self, bid: Bid) -> bool{
-        unimplemented!();
+    pub async fn is_bid_valid(&self, bid: Bid) -> bool{
+        let current_bid = self.state.current_bid.lock().await;
+        match current_bid.as_ref() {
+            Some(current_bid) => {
+                bid.price > current_bid.price
+            },
+            None => {
+                true // First bid is always valid
+            }
+        }
     }
 }
