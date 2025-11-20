@@ -69,15 +69,31 @@ struct Game{
 }
 
 impl Game{
-    pub fn new(&self, players: Vec<Player>) -> Self{
+    pub fn new(&self, creator: Player) -> Self{
         Self{
             game_id: generate_random_id(),
-            players: players,
+            players: vec![players],
             status: GameStatus::CREATED,
             state: GameState::new()
         }
     }
 
+    pub fn join(&mut self, player: Player){
+        self.players.push(player);
+    }
+
+    pub fn start(&mut self){
+        self.status = GameStatus::STARTED;
+    }
+
+    pub fn end(&mut self) -> Player{
+        let evaluator = Evaluator::default();
+        let winner = evaluator.get_winner(self.state);
+
+        self.status = GameStatus::FINISHED;
+
+        winner
+    }
 
     pub fn bid(&mut self, bid: Bid){
         self.state.current_bid = bid;
