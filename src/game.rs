@@ -24,7 +24,7 @@ struct Bid{
     // against whom the bid is going on
     price: u64,
     // the player who has made the last bid
-    player: Option<Player>,
+    player: Player,
     // the time when this bid was made
     timestamp: u64
 }
@@ -95,8 +95,14 @@ impl Game{
         winner
     }
 
-    pub fn bid(&mut self, bid: Bid){
+    fn update_bid(&mut self, bid: Bid){
         self.state.current_bid = bid;
+    }
+
+    pub fn try_update_bid(&mut self, bid: Bid){
+        if self.is_bid_valid(bid) {
+            update_bid(bid);
+        }
     }
 
     pub fn sell(&mut self) -> Result<(), String>{

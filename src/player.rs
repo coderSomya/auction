@@ -18,4 +18,15 @@ impl Player{
     pub fn join_game(mut game: Game){
         game.add_player(self);
     }
+
+    pub fn bid(&self, game: Game, cricketer: String, price: u64){
+        let bid = Bid{
+            cricketer: cricketer,
+            price: price,
+            player: self,
+            timestamp: get_current_timestamp()
+        };
+
+        game.try_update_bid(bid);
+    }
 }
