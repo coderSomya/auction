@@ -1,0 +1,12 @@
+{
+    "data":{
+        "batsmen":{
+            "Virat Kohli": 20,
+            "MS Dhoni": 18,
+            "Rohit Sharma":19
+        },
+        "bowlers":{
+            "Jasprit Bumrah":20
+        }
+    }
+}
