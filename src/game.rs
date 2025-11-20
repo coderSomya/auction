@@ -2,7 +2,8 @@ use crate::player::Player;
 use std::collections::HashMap;
 use std::vec::Vec;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc};
 
 
 const MAX_IDLE_TIME_IN_SECS: u64 = 1*60; // 1 min
@@ -20,30 +21,37 @@ struct Buy{
 }
 
 #[derive(Clone)]
-struct Bid{
+pub struct Bid{
     // for whom the bid is going on
-    cricketer: String,
+    pub cricketer: String,
     // against whom the bid is going on
-    price: u64,
+    pub price: u64,
     // the player who has made the last bid
-    player: Player,
+    pub player: Player,
     // the time when this bid was made
-    timestamp: u64
+    pub timestamp: u64
 }
 
 struct GameState{
     // player -> {cricketer, price}
     teams: Mutex<HashMap<String, Vec<Buy>>>,
     // current bid for the cricketer being auctioned
-    current_bid: Mutex<Option<Bid>>
+    current_bid: Mutex<Option<Bid>>,
+    // channel sender for incoming bids
+    bid_tx: mpsc::UnboundedSender<Bid>
 }
 
 impl GameState{
-    pub fn new() -> Self{
-        Self{
-            teams: Mutex::new(HashMap::new()),
-            current_bid: Mutex::new(None)
-        }
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<Bid>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            Self{
+                teams: Mutex::new(HashMap::new()),
+                current_bid: Mutex::new(None),
+                bid_tx: tx
+            },
+            rx
+        )
     }
 
     pub async fn add_cricketer_to_a_team(&self, player: String, cricketer: String, price: u64){
@@ -62,21 +70,55 @@ impl GameState{
 
 }
 
-struct Game{
+pub struct Game{
     game_id: String,
     players: Vec<Player>,
     status: GameStatus,
-    state: GameState
+    state: Arc<GameState>,
+    bid_rx: Option<mpsc::UnboundedReceiver<Bid>>
 }
 
 impl Game{
     pub fn new(&self, creator: Player) -> Self{
+        let (state, bid_rx) = GameState::new();
         Self{
             game_id: generate_random_id(),
             players: vec![creator],
             status: GameStatus::CREATED,
-            state: GameState::new()
+            state: Arc::new(state),
+            bid_rx: Some(bid_rx)
         }
+    }
+
+    pub fn start_bid_consumer(&mut self) {
+        let mut bid_rx = match self.bid_rx.take() {
+            Some(rx) => rx,
+            None => return, // Consumer already started
+        };
+        let state = Arc::clone(&self.state);
+        
+        tokio::spawn(async move {
+            while let Some(bid) = bid_rx.recv().await {
+                // Validate the bid
+                let is_valid = {
+                    let current_bid = state.current_bid.lock().await;
+                    match current_bid.as_ref() {
+                        Some(current_bid) => {
+                            bid.price > current_bid.price
+                        },
+                        None => {
+                            true // First bid is always valid
+                        }
+                    }
+                };
+
+                // Update bid if valid
+                if is_valid {
+                    let mut current_bid = state.current_bid.lock().await;
+                    *current_bid = Some(bid);
+                }
+            }
+        });
     }
 
     pub fn add_player(&mut self, player: Player){
@@ -85,6 +127,7 @@ impl Game{
 
     pub fn start(&mut self){
         self.status = GameStatus::STARTED;
+        self.start_bid_consumer();
     }
 
     pub fn end(&mut self) -> Player{
@@ -96,15 +139,22 @@ impl Game{
         winner
     }
 
-    async fn update_bid(&self, bid: Bid){
-        let mut current_bid = self.state.current_bid.lock().await;
-        *current_bid = Some(bid);
+    pub fn try_update_bid(&self, bid: Bid){
+        // Send bid to channel for processing
+        let _ = self.state.bid_tx.send(bid);
     }
 
-    pub async fn try_update_bid(&self, bid: Bid){
-        if self.is_bid_valid(bid.clone()).await {
-            self.update_bid(bid).await;
-        }
+    pub fn send_bid_to_channel(&self, player: Player, cricketer: String, price: u64) -> Result<(), mpsc::error::SendError<Bid>> {
+        let bid = Bid {
+            cricketer,
+            price,
+            player,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        self.state.bid_tx.send(bid)
     }
 
     pub async fn sell(&self) -> Result<(), String>{
@@ -121,11 +171,11 @@ impl Game{
         }
     }
 
-    pub async fn is_bid_valid(&self, bid: Bid) -> bool{
+    pub async fn is_bid_valid(&self, bid: &Bid) -> bool{
         let current_bid = self.state.current_bid.lock().await;
         match current_bid.as_ref() {
             Some(current_bid) => {
-                bid.price > current_bid.price
+                bid.price > current_bid.price && bid.cricketer == current_bid.cricketer
             },
             None => {
                 true // First bid is always valid

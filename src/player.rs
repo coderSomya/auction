@@ -24,14 +24,8 @@ impl Player{
         game.add_player(self);
     }
 
-    pub fn bid(&self, game: Game, cricketer: String, price: u64){
-        let bid = Bid{
-            cricketer: cricketer,
-            price: price,
-            player: self,
-            timestamp: get_current_timestamp()
-        };
-
-        game.try_update_bid(bid);
+    pub fn bid(&self, game: &crate::game::Game, cricketer: String, price: u64) -> Result<(), tokio::sync::mpsc::error::SendError<crate::game::Bid>> {
+        // Send bid to the game's bid channel
+        game.send_bid_to_channel(self.clone(), cricketer, price)
     }
 }
