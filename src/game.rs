@@ -72,13 +72,13 @@ impl Game{
     pub fn new(&self, creator: Player) -> Self{
         Self{
             game_id: generate_random_id(),
-            players: vec![players],
+            players: vec![creator],
             status: GameStatus::CREATED,
             state: GameState::new()
         }
     }
 
-    pub fn join(&mut self, player: Player){
+    pub fn add_player(&mut self, player: Player){
         self.players.push(player);
     }
 

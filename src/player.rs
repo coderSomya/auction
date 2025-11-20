@@ -15,7 +15,7 @@ impl Player{
         }
     }
 
-    pub fn join_game(game_id: String){
-
+    pub fn join_game(mut game: Game){
+        game.add_player(self);
     }
 }
