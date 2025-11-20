@@ -1,9 +1,11 @@
 use crate::player::Player;
+use crate::purse::Purse;
 use std::collections::HashMap;
 use std::vec::Vec;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
+use serde::{Serialize, Deserialize};
 
 
 const MAX_IDLE_TIME_IN_SECS: u64 = 1*60; // 1 min
@@ -70,20 +72,36 @@ impl GameState{
 
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Team{
+    pub player: Player,
+    pub purse: Purse
+}
+
+impl Team{
+    pub fn new(player: Player, purse: Purse) -> Self{
+        Self{
+            player,
+            purse
+        }
+    }
+}
+
 pub struct Game{
     game_id: String,
-    players: Vec<Player>,
+    teams: Vec<Team>,
     status: GameStatus,
     state: Arc<GameState>,
     bid_rx: Option<mpsc::UnboundedReceiver<Bid>>
 }
 
 impl Game{
-    pub fn new(&self, creator: Player) -> Self{
+    pub fn new(&self, creator: Player, initial_purse: u64) -> Self{
         let (state, bid_rx) = GameState::new();
+        let creator_team = Team::new(creator, Purse::new(initial_purse));
         Self{
             game_id: generate_random_id(),
-            players: vec![creator],
+            teams: vec![creator_team],
             status: GameStatus::CREATED,
             state: Arc::new(state),
             bid_rx: Some(bid_rx)
@@ -121,8 +139,13 @@ impl Game{
         });
     }
 
-    pub fn add_player(&mut self, player: Player){
-        self.players.push(player);
+    pub fn add_team(&mut self, player: Player, initial_purse: u64){
+        let team = Team::new(player, Purse::new(initial_purse));
+        self.teams.push(team);
+    }
+
+    pub fn teams(&self) -> &Vec<Team> {
+        &self.teams
     }
 
     pub fn start(&mut self){
