@@ -13,4 +13,8 @@ impl Purse{
     pub fn spend(&mut self, cash: u64){
         self.cash -= cash;
     }
+
+    pub fn cash(&self) -> u64 {
+        self.cash
+    }
 }

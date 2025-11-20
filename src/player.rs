@@ -20,8 +20,20 @@ impl Player{
         &self.username
     }
 
-    pub fn join_game(&self, game: &mut crate::game::Game, initial_purse: u64){
+    pub fn join_game(&mut self, game: &mut crate::game::Game, initial_purse: u64){
+        self.coins -= initial_purse;
         game.add_team(self.clone(), initial_purse);
+    }
+
+    pub async fn exit_game(&mut self, game: &mut crate::game::Game){
+        // Get money left from the team's purse
+        let money_left = if let Some(team) = game.teams().iter().find(|t| t.player.username() == self.username()) {
+            team.purse.cash()
+        } else {
+            0
+        };
+        game.remove(self).await;
+        self.coins += money_left;
     }
 
     pub fn place_bid(&self, game: &crate::game::Game, cricketer: String, price: u64) -> Result<(), tokio::sync::mpsc::error::SendError<crate::game::Bid>> {

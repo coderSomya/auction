@@ -92,7 +92,8 @@ pub struct Game{
     teams: Vec<Team>,
     status: GameStatus,
     state: Arc<GameState>,
-    bid_rx: Option<mpsc::UnboundedReceiver<Bid>>
+    bid_rx: Option<mpsc::UnboundedReceiver<Bid>>,
+    bank: u64 // total money collected in this game
 }
 
 impl Game{
@@ -104,7 +105,8 @@ impl Game{
             teams: vec![creator_team],
             status: GameStatus::CREATED,
             state: Arc::new(state),
-            bid_rx: Some(bid_rx)
+            bid_rx: Some(bid_rx),
+            bank: 0
         }
     }
 
@@ -158,7 +160,7 @@ impl Game{
         let winner = evaluator.get_winner(self.state);
 
         self.status = GameStatus::FINISHED;
-
+        self.award_winner(winner);
         winner
     }
 
@@ -180,18 +182,44 @@ impl Game{
         self.state.bid_tx.send(bid)
     }
 
-    pub async fn sell(&self) -> Result<(), String>{
+    pub async fn sell(&mut self) -> Result<(), String>{
         let mut current_bid = self.state.current_bid.lock().await;
         match current_bid.take(){
             Some(bid) => {
+                let player_username = bid.player.username().clone();
+                let bid_price = bid.price;
                 drop(current_bid); // Release the lock before calling another async function
-                self.state.add_cricketer_to_a_team(bid.player.username().clone(), bid.cricketer, bid.price).await;
+                self.state.add_cricketer_to_a_team(player_username.clone(), bid.cricketer.clone(), bid_price).await;
+
+                // Reduce the purse of this player
+                if let Some(team) = self.teams.iter_mut().find(|t| t.player.username() == &player_username) {
+                    team.purse.spend(bid_price);
+                    // Add to bank
+                    self.bank += bid_price;
+                }
+
                 Ok(())
             },
             None => {
                 Err("cannot sell with no current bids".to_string())
             }
         }
+    }
+    
+    pub async fn remove(&mut self, player: &Player) {
+        let username = player.username().clone();
+        
+        // Remove from teams vector
+        self.teams.retain(|team| team.player.username() != &username);
+        
+        // Remove from state.teams HashMap
+        let mut state_teams = self.state.teams.lock().await;
+        state_teams.remove(&username);
+    }
+
+    pub fn award_winner(&self, winner: Player){
+        let winning_amount = get_winning_amount(self);
+        winner.coins += winning_amount;
     }
 
     pub async fn is_bid_valid(&self, bid: &Bid) -> bool{
