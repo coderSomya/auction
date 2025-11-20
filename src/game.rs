@@ -11,7 +11,8 @@ use serde::{Serialize, Deserialize};
 const MAX_IDLE_TIME_IN_SECS: u64 = 1*60; // 1 min
 
 
-enum GameStatus{
+#[derive(Debug, Clone, PartialEq)]
+pub enum GameStatus{
     CREATED,
     STARTED,
     FINISHED
@@ -97,16 +98,37 @@ pub struct Game{
 }
 
 impl Game{
-    pub fn new(&self, creator: Player, initial_purse: u64) -> Self{
+    pub fn new(creator: Player, initial_purse: u64) -> Self{
         let (state, bid_rx) = GameState::new();
         let creator_team = Team::new(creator, Purse::new(initial_purse));
         Self{
-            game_id: generate_random_id(),
+            game_id: uuid::Uuid::new_v4().to_string(),
             teams: vec![creator_team],
             status: GameStatus::CREATED,
             state: Arc::new(state),
             bid_rx: Some(bid_rx),
             bank: 0
+        }
+    }
+
+    pub fn game_id(&self) -> &String {
+        &self.game_id
+    }
+
+    pub fn status(&self) -> &GameStatus {
+        &self.status
+    }
+
+    pub fn bank(&self) -> u64 {
+        self.bank
+    }
+
+    pub fn get_info(&self) -> crate::game_manager::GameInfo {
+        crate::game_manager::GameInfo {
+            game_id: self.game_id.clone(),
+            status: format!("{:?}", self.status),
+            team_count: self.teams.len(),
+            bank: self.bank,
         }
     }
 
@@ -156,11 +178,17 @@ impl Game{
     }
 
     pub fn end(&mut self) -> Player{
-        let evaluator = Evaluator::default();
-        let winner = evaluator.get_winner(self.state);
+        // TODO: Implement evaluator logic
+        // For now, return the first player as winner
+        let winner = if let Some(team) = self.teams.first() {
+            team.player.clone()
+        } else {
+            // Return a dummy player if no teams
+            Player::new("".to_string(), "".to_string(), "".to_string())
+        };
 
         self.status = GameStatus::FINISHED;
-        self.award_winner(winner);
+        self.award_winner(winner.clone());
         winner
     }
 

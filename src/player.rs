@@ -1,9 +1,9 @@
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub struct Player{
     username: String,
     password: String,
     email: String,
-    coins: u64
+    pub coins: u64
 }
 
 impl Player{
