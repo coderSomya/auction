@@ -16,6 +16,19 @@ impl Player{
         }
     }
 
+    pub fn with_coins(username: String, password: String, email: String, coins: u64) -> Self{
+        Self{
+            username,
+            password,
+            email,
+            coins
+        }
+    }
+
+    pub fn add_coins(&mut self, coins: u64){
+        self.coins += coins;
+    }
+
     pub fn username(&self) -> &String {
         &self.username
     }

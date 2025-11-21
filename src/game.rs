@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use serde::{Serialize, Deserialize};
-
+use crate::utils::get_winning_amount;
 
 const MAX_IDLE_TIME_IN_SECS: u64 = 1*60; // 1 min
 
@@ -33,6 +33,17 @@ pub struct Bid{
     pub player: Player,
     // the time when this bid was made
     pub timestamp: u64
+}
+
+impl Bid{
+    pub fn new(cricketer: String, price: u64, player: Player, timestamp: u64) -> Self{
+        Self{
+            cricketer,
+            price,
+            player,
+            timestamp
+        }
+    }
 }
 
 struct GameState{
@@ -245,8 +256,8 @@ impl Game{
         state_teams.remove(&username);
     }
 
-    pub fn award_winner(&self, winner: Player){
-        let winning_amount = get_winning_amount(self);
+    pub fn award_winner(&self, mut winner: Player){
+        let winning_amount = get_winning_amount(&self);
         winner.coins += winning_amount;
     }
 
@@ -260,5 +271,45 @@ impl Game{
                 true // First bid is always valid
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_game_data(){
+        let mut player1 = Player::new("test".to_string(), "test".to_string(), "test".to_string());
+        player1.add_coins(100);
+
+        let mut game = Game::new(player1.clone(), 50);
+
+        assert_eq!(game.bank(), 0);
+
+        assert_eq!(game.teams().len(), 1);
+        assert_eq!(game.teams()[0].player.username(), "test");
+        assert_eq!(game.teams()[0].purse.cash(), 50);
+
+        assert_eq!(*game.status(), GameStatus::CREATED);
+
+        let mut player2 = Player::new("test2".to_string(), "test2".to_string(), "test2".to_string());
+        player2.add_coins(100);
+        
+        player2.join_game(&mut game, 40);
+        assert_eq!(game.teams().len(), 2);
+        assert_eq!(game.teams()[1].player.username(), "test2");
+        assert_eq!(game.teams()[1].purse.cash(), 40);
+
+        game.start();
+        game.start_bid_consumer();
+        
+        assert_eq!(*game.status(), GameStatus::STARTED);
+
+        let bid = Bid::new("msd".to_string(), 20, player1.clone(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+        game.try_update_bid(bid);
+        
+        // Give the async task time to process the bid
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 }
