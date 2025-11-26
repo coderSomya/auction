@@ -1,5 +1,6 @@
-use crate::game::{Game, Bid};
+use crate::game::Game;
 use crate::player::Player;
+use crate::ws::broadcast_to_room;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -13,6 +14,12 @@ pub enum GameManagerMessage {
         initial_purse: u64,
         response_tx: mpsc::UnboundedSender<String>, // game_id
     },
+    AddPlayer {
+        game_id: String,
+        player: Player,
+        initial_purse: u64,
+        response_tx: mpsc::UnboundedSender<Result<(), String>>,
+    },
     StartGame {
         game_id: String,
         response_tx: mpsc::UnboundedSender<Result<(), String>>,
@@ -20,8 +27,12 @@ pub enum GameManagerMessage {
     PlaceBid {
         game_id: String,
         player: Player,
-        cricketer: String,
         price: u64,
+        response_tx: mpsc::UnboundedSender<Result<(), String>>,
+    },
+    OptOut {
+        game_id: String,
+        player_username: String,
         response_tx: mpsc::UnboundedSender<Result<(), String>>,
     },
     SellCricketer {
@@ -59,6 +70,7 @@ pub struct GameInfo {
 pub struct GameManager {
     games: Arc<Mutex<HashMap<String, Game>>>,
     message_rx: mpsc::UnboundedReceiver<GameManagerMessage>,
+    message_tx: mpsc::UnboundedSender<GameManagerMessage>,
 }
 
 impl GameManager {
@@ -69,6 +81,7 @@ impl GameManager {
             Self {
                 games: Arc::new(Mutex::new(HashMap::new())),
                 message_rx: rx,
+                message_tx: tx.clone(),
             },
             tx,
         )
@@ -92,21 +105,37 @@ impl GameManager {
                 let game_id = self.create_game(creator, initial_purse).await;
                 let _ = response_tx.send(game_id);
             }
+            GameManagerMessage::AddPlayer {
+                game_id,
+                player,
+                initial_purse,
+                response_tx,
+            } => {
+                let result = self.add_player(&game_id, player, initial_purse).await;
+                let _ = response_tx.send(result);
+            }
             GameManagerMessage::StartGame {
                 game_id,
                 response_tx,
             } => {
-                let result = self.start_game(&game_id).await;
+                let result = self.start_game(&game_id, self.message_tx.clone()).await;
                 let _ = response_tx.send(result);
             }
             GameManagerMessage::PlaceBid {
                 game_id,
                 player,
-                cricketer,
                 price,
                 response_tx,
             } => {
-                let result = self.place_bid(&game_id, player, cricketer, price).await;
+                let result = self.place_bid(&game_id, player, price).await;
+                let _ = response_tx.send(result);
+            }
+            GameManagerMessage::OptOut {
+                game_id,
+                player_username,
+                response_tx,
+            } => {
+                let result = self.opt_out(&game_id, player_username).await;
                 let _ = response_tx.send(result);
             }
             GameManagerMessage::SellCricketer {
@@ -155,10 +184,148 @@ impl GameManager {
     }
 
     /// Start a game
-    async fn start_game(&self, game_id: &str) -> Result<(), String> {
+    async fn start_game(&self, game_id: &str, game_manager_tx: mpsc::UnboundedSender<GameManagerMessage>) -> Result<(), String> {
+        let games = self.games.lock().await;
+        if let Some(game) = games.get(game_id) {
+            let game_id_clone = game_id.to_string();
+            let cricketers = game.get_cricketers();
+            let teams_count = game.teams_count();
+            let state = game.get_state();
+            drop(games);
+            
+            // Start the game
+            let mut games = self.games.lock().await;
+            if let Some(game) = games.get_mut(game_id) {
+                game.start();
+            }
+            drop(games);
+
+            // Start game loop in background
+            tokio::spawn(async move {
+                let mut cricketer_index = 0;
+                loop {
+                    if cricketer_index >= cricketers.len() {
+                        break;
+                    }
+
+                    let cricketer = cricketers[cricketer_index].clone();
+                    cricketer_index += 1;
+
+                    // Set current cricketer and reset state
+                    state.set_current_cricketer(Some(cricketer.clone())).await;
+                    state.reset_opt_outs().await;
+                    state.reset_bid_state().await;
+
+                    // Broadcast new cricketer available
+                    crate::ws::broadcast_to_room(&game_id_clone, "cricketer_available", &serde_json::json!({
+                        "cricketer": cricketer.name,
+                        "base_price": cricketer.price
+                    }));
+
+                    let start_time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+
+                    // Timer loop
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+                        let current_time = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+
+                        let opted_out_count = state.get_opted_out_count().await;
+                        let last_bid_time = state.get_last_bid_timestamp().await;
+
+                        // Check if n-1 players have opted out
+                        if opted_out_count >= teams_count - 1 {
+                            let current_bid = state.get_current_bid().await;
+                            if let Some(_bid) = current_bid.as_ref() {
+                                // Sell to current bid holder
+                                let _ = game_manager_tx.send(crate::game_manager::GameManagerMessage::SellCricketer {
+                                    game_id: game_id_clone.clone(),
+                                    response_tx: mpsc::unbounded_channel().0,
+                                });
+                            } else {
+                                // All opted out, cricketer goes unsold
+                                crate::ws::broadcast_to_room(&game_id_clone, "cricketer_unsold", &serde_json::json!({
+                                    "cricketer": cricketer.name
+                                }));
+                            }
+                            break;
+                        }
+
+                        // Check if all players have opted out
+                        if opted_out_count >= teams_count {
+                            let current_bid = state.get_current_bid().await;
+                            if let Some(_bid) = current_bid.as_ref() {
+                                // Sell to current bid holder
+                                let _ = game_manager_tx.send(crate::game_manager::GameManagerMessage::SellCricketer {
+                                    game_id: game_id_clone.clone(),
+                                    response_tx: mpsc::unbounded_channel().0,
+                                });
+                            } else {
+                                // All opted out, cricketer goes unsold
+                                crate::ws::broadcast_to_room(&game_id_clone, "cricketer_unsold", &serde_json::json!({
+                                    "cricketer": cricketer.name
+                                }));
+                            }
+                            break;
+                        }
+
+                        // Check timer
+                        if let Some(last_bid) = last_bid_time {
+                            if current_time - last_bid >= crate::game::MAX_IDLE_TIME_IN_SECS {
+                                let current_bid = state.get_current_bid().await;
+                                if let Some(_bid) = current_bid.as_ref() {
+                                    // Sell to current bid holder
+                                    let _ = game_manager_tx.send(crate::game_manager::GameManagerMessage::SellCricketer {
+                                        game_id: game_id_clone.clone(),
+                                        response_tx: mpsc::unbounded_channel().0,
+                                    });
+                                } else {
+                                    // No bids, cricketer goes unsold
+                                    crate::ws::broadcast_to_room(&game_id_clone, "cricketer_unsold", &serde_json::json!({
+                                        "cricketer": cricketer.name
+                                    }));
+                                }
+                                break;
+                            }
+                        } else {
+                            // No bids yet, check if time since cricketer was announced has elapsed
+                            if current_time - start_time >= crate::game::MAX_IDLE_TIME_IN_SECS {
+                                // Cricketer goes unsold
+                                crate::ws::broadcast_to_room(&game_id_clone, "cricketer_unsold", &serde_json::json!({
+                                    "cricketer": cricketer.name
+                                }));
+                                break;
+                            }
+                        }
+                    }
+
+                    // Wait a bit before next cricketer
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                }
+            });
+
+            Ok(())
+        } else {
+            Err(format!("Game {} not found", game_id))
+        }
+    }
+
+    /// Add a player to a game
+    async fn add_player(
+        &self,
+        game_id: &str,
+        player: Player,
+        initial_purse: u64,
+    ) -> Result<(), String> {
         let mut games = self.games.lock().await;
         if let Some(game) = games.get_mut(game_id) {
-            game.start();
+            game.add_team(player, initial_purse);
             Ok(())
         } else {
             Err(format!("Game {} not found", game_id))
@@ -170,13 +337,33 @@ impl GameManager {
         &self,
         game_id: &str,
         player: Player,
-        cricketer: String,
         price: u64,
     ) -> Result<(), String> {
         let games = self.games.lock().await;
         if let Some(game) = games.get(game_id) {
-            game.send_bid_to_channel(player, cricketer, price)
-                .map_err(|e| format!("Failed to send bid: {:?}", e))?;
+            // Get current cricketer
+            let state = game.get_state();
+            if let Some(cricketer) = state.get_current_cricketer().await {
+                game.send_bid_to_channel(player, cricketer.name, price)
+                    .map_err(|e| format!("Failed to send bid: {:?}", e))?;
+                Ok(())
+            } else {
+                Err("No cricketer currently being auctioned".to_string())
+            }
+        } else {
+            Err(format!("Game {} not found", game_id))
+        }
+    }
+
+    /// Opt out of current bidding
+    async fn opt_out(
+        &self,
+        game_id: &str,
+        player_username: String,
+    ) -> Result<(), String> {
+        let games = self.games.lock().await;
+        if let Some(game) = games.get(game_id) {
+            game.opt_out(player_username).await;
             Ok(())
         } else {
             Err(format!("Game {} not found", game_id))
@@ -187,7 +374,21 @@ impl GameManager {
     async fn sell_cricketer(&self, game_id: &str) -> Result<(), String> {
         let mut games = self.games.lock().await;
         if let Some(game) = games.get_mut(game_id) {
-            game.sell().await
+            match game.sell().await {
+                Ok((player_username, cricketer, price)) => {
+                    // Broadcast cricketer sold event to all connected clients
+                    broadcast_to_room(game_id, "cricketer_sold", &serde_json::json!({
+                        "game_id": game_id,
+                        "player": {
+                            "username": player_username,
+                        },
+                        "cricketer": cricketer,
+                        "price": price
+                    }));
+                    Ok(())
+                }
+                Err(e) => Err(e)
+            }
         } else {
             Err(format!("Game {} not found", game_id))
         }

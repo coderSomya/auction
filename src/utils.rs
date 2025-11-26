@@ -2,11 +2,17 @@ use crate::game::Game;
 use std::fs::File;
 use std::io::BufReader;
 use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Cricketer{
-    name: String,
-    price: u64
+    pub name: String,
+    pub price: u64
+}
+
+#[derive(Deserialize)]
+struct CricketersData {
+    data: HashMap<String, u64>
 }
 
 pub fn get_random_num() -> u64{
@@ -18,8 +24,12 @@ pub fn get_winning_amount(game: &Game) -> u64{
 }
 
 pub fn load_cricketers() -> Vec<Cricketer>{
-    let file = File::open("cricketers.json").unwrap();
-    let readers = BufReader::new(file);
-    // return a list of cricketers with their name and price from the json
-    Vec::new()
+    let file = File::open("src/cricketers.json").unwrap();
+    let reader = BufReader::new(file);
+    let cricketers_data: CricketersData = serde_json::from_reader(reader).unwrap();
+    
+    cricketers_data.data
+        .into_iter()
+        .map(|(name, price)| Cricketer { name, price })
+        .collect()
 }

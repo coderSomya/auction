@@ -1,14 +1,16 @@
 use crate::player::Player;
 use crate::purse::Purse;
-use std::collections::HashMap;
+use crate::utils::{get_winning_amount, Cricketer, load_cricketers};
+use std::collections::{HashMap, HashSet};
 use std::vec::Vec;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use serde::{Serialize, Deserialize};
-use crate::utils::get_winning_amount;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 
-const MAX_IDLE_TIME_IN_SECS: u64 = 1*60; // 1 min
+pub const MAX_IDLE_TIME_IN_SECS: u64 = 60; // 1 min
 
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,13 +48,19 @@ impl Bid{
     }
 }
 
-struct GameState{
+pub struct GameState{
     // player -> {cricketer, price}
     teams: Mutex<HashMap<String, Vec<Buy>>>,
     // current bid for the cricketer being auctioned
     current_bid: Mutex<Option<Bid>>,
     // channel sender for incoming bids
-    bid_tx: mpsc::UnboundedSender<Bid>
+    bid_tx: mpsc::UnboundedSender<Bid>,
+    // players who have opted out of current bidding
+    opted_out: Mutex<HashSet<String>>,
+    // timestamp of last bid (for timer)
+    last_bid_timestamp: Mutex<Option<u64>>,
+    // current cricketer being auctioned
+    current_cricketer: Mutex<Option<Cricketer>>,
 }
 
 impl GameState{
@@ -62,7 +70,10 @@ impl GameState{
             Self{
                 teams: Mutex::new(HashMap::new()),
                 current_bid: Mutex::new(None),
-                bid_tx: tx
+                bid_tx: tx,
+                opted_out: Mutex::new(HashSet::new()),
+                last_bid_timestamp: Mutex::new(None),
+                current_cricketer: Mutex::new(None),
             },
             rx
         )
@@ -80,6 +91,57 @@ impl GameState{
         }else{
             teams.insert(player, vec![buy]);
         }
+    }
+
+    pub async fn opt_out(&self, player_username: String) -> bool {
+        let mut opted_out = self.opted_out.lock().await;
+        opted_out.insert(player_username)
+    }
+
+    pub async fn reset_opt_outs(&self) {
+        let mut opted_out = self.opted_out.lock().await;
+        opted_out.clear();
+    }
+
+    pub async fn get_opted_out_count(&self) -> usize {
+        let opted_out = self.opted_out.lock().await;
+        opted_out.len()
+    }
+
+    pub async fn set_current_cricketer(&self, cricketer: Option<Cricketer>) {
+        let mut current = self.current_cricketer.lock().await;
+        *current = cricketer;
+    }
+
+    pub async fn get_current_cricketer(&self) -> Option<Cricketer> {
+        let current = self.current_cricketer.lock().await;
+        current.clone()
+    }
+
+    pub async fn update_last_bid_timestamp(&self) {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut last_bid = self.last_bid_timestamp.lock().await;
+        *last_bid = Some(timestamp);
+    }
+
+    pub async fn get_last_bid_timestamp(&self) -> Option<u64> {
+        let last_bid = self.last_bid_timestamp.lock().await;
+        *last_bid
+    }
+
+    pub async fn reset_bid_state(&self) {
+        let mut current_bid = self.current_bid.lock().await;
+        *current_bid = None;
+        let mut last_bid = self.last_bid_timestamp.lock().await;
+        *last_bid = None;
+    }
+
+    pub async fn get_current_bid(&self) -> Option<Bid> {
+        let current_bid = self.current_bid.lock().await;
+        current_bid.clone()
     }
 
 }
@@ -105,20 +167,26 @@ pub struct Game{
     status: GameStatus,
     state: Arc<GameState>,
     bid_rx: Option<mpsc::UnboundedReceiver<Bid>>,
-    bank: u64 // total money collected in this game
+    bank: u64, // total money collected in this game
+    cricketers: Vec<Cricketer>, // list of cricketers to auction
+    cricketer_index: usize, // current index in cricketers list
 }
 
 impl Game{
     pub fn new(creator: Player, initial_purse: u64) -> Self{
         let (state, bid_rx) = GameState::new();
         let creator_team = Team::new(creator, Purse::new(initial_purse));
+        let mut cricketers = load_cricketers();
+        cricketers.shuffle(&mut thread_rng());
         Self{
             game_id: uuid::Uuid::new_v4().to_string(),
             teams: vec![creator_team],
             status: GameStatus::CREATED,
             state: Arc::new(state),
             bid_rx: Some(bid_rx),
-            bank: 0
+            bank: 0,
+            cricketers,
+            cricketer_index: 0,
         }
     }
 
@@ -157,10 +225,15 @@ impl Game{
                     let current_bid = state.current_bid.lock().await;
                     match current_bid.as_ref() {
                         Some(current_bid) => {
-                            bid.price > current_bid.price
+                            bid.price > current_bid.price && bid.cricketer == current_bid.cricketer
                         },
                         None => {
-                            true // First bid is always valid
+                            // Check if bid is for current cricketer and meets base price
+                            if let Some(cricketer) = state.get_current_cricketer().await {
+                                bid.cricketer == cricketer.name && bid.price >= cricketer.price
+                            } else {
+                                false
+                            }
                         }
                     }
                 };
@@ -168,10 +241,36 @@ impl Game{
                 // Update bid if valid
                 if is_valid {
                     let mut current_bid = state.current_bid.lock().await;
-                    *current_bid = Some(bid);
+                    *current_bid = Some(bid.clone());
+                    drop(current_bid);
+                    state.update_last_bid_timestamp().await;
+                    // Reset opt-outs when a new bid comes in
+                    state.reset_opt_outs().await;
                 }
             }
         });
+    }
+
+    pub async fn opt_out(&self, player_username: String) -> bool {
+        self.state.opt_out(player_username).await
+    }
+
+    pub async fn get_next_cricketer(&mut self) -> Option<Cricketer> {
+        if self.cricketer_index < self.cricketers.len() {
+            let cricketer = self.cricketers[self.cricketer_index].clone();
+            self.cricketer_index += 1;
+            Some(cricketer)
+        } else {
+            None
+        }
+    }
+
+    pub fn teams_count(&self) -> usize {
+        self.teams.len()
+    }
+
+    pub fn get_state(&self) -> Arc<GameState> {
+        Arc::clone(&self.state)
     }
 
     pub fn add_team(&mut self, player: Player, initial_purse: u64){
@@ -187,6 +286,19 @@ impl Game{
         self.status = GameStatus::STARTED;
         self.start_bid_consumer();
     }
+
+    pub fn get_cricketers(&self) -> Vec<Cricketer> {
+        self.cricketers.clone()
+    }
+
+    pub fn get_cricketer_index(&self) -> usize {
+        self.cricketer_index
+    }
+
+    pub fn set_cricketer_index(&mut self, index: usize) {
+        self.cricketer_index = index;
+    }
+
 
     pub fn end(&mut self) -> Player{
         // TODO: Implement evaluator logic
@@ -221,12 +333,13 @@ impl Game{
         self.state.bid_tx.send(bid)
     }
 
-    pub async fn sell(&mut self) -> Result<(), String>{
+    pub async fn sell(&mut self) -> Result<(String, String, u64), String>{
         let mut current_bid = self.state.current_bid.lock().await;
         match current_bid.take(){
             Some(bid) => {
                 let player_username = bid.player.username().clone();
                 let bid_price = bid.price;
+                let cricketer = bid.cricketer.clone();
                 drop(current_bid); // Release the lock before calling another async function
                 self.state.add_cricketer_to_a_team(player_username.clone(), bid.cricketer.clone(), bid_price).await;
 
@@ -237,7 +350,7 @@ impl Game{
                     self.bank += bid_price;
                 }
 
-                Ok(())
+                Ok((player_username, cricketer, bid_price))
             },
             None => {
                 Err("cannot sell with no current bids".to_string())

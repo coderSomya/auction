@@ -1,12 +1,22 @@
 {
     "data":{
-        "batsmen":{
-            "Virat Kohli": 20,
-            "MS Dhoni": 18,
-            "Rohit Sharma":19
-        },
-        "bowlers":{
-            "Jasprit Bumrah":20
-        }
+        "Virat Kohli": 20,
+        "MS Dhoni": 18,
+        "Rohit Sharma":19,
+        "Jasprit Bumrah":20,
+        "Ravindra Jadeja":18,
+        "Hardik Pandya":19,
+        "Ravichandran Ashwin":16,
+        "Yuzvendra Chahal":16,
+        "Mohammed Shami":18,
+        "Bhuvneshwar Kumar":16,
+        "Kuldeep Yadav":18,
+        "Kedar Jadhav":15,
+        "Dinesh Karthik":15,
+        "Manish Pandey":14,
+        "Shreyas Iyer":18,
+        "Rishabh Pant":19,
+        "KL Rahul":18,
+        "Suryakumar Yadav":19
     }
 }
