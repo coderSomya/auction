@@ -300,19 +300,23 @@ impl Game{
     }
 
 
-    pub fn end(&mut self) -> Player{
-        // TODO: Implement evaluator logic
-        // For now, return the first player as winner
-        let winner = if let Some(team) = self.teams.first() {
-            team.player.clone()
-        } else {
-            // Return a dummy player if no teams
-            Player::new("".to_string(), "".to_string(), "".to_string())
-        };
+    pub async fn end(&mut self) -> Player {
+        use crate::evaluator::Evaluator;
+        
+        // Use default evaluator (random)
+        let evaluator = Evaluator::new();
+        let winner_result = evaluator.get_winner(self).await;
+        let winner = winner_result.player;
 
         self.status = GameStatus::FINISHED;
-        self.award_winner(winner.clone());
-        winner
+        let winner_username = winner.username().clone();
+        self.award_winner(&winner_username);
+        // Get the updated winner from teams
+        if let Some(team) = self.teams.iter().find(|t| t.player.username() == &winner_username) {
+            team.player.clone()
+        } else {
+            winner
+        }
     }
 
     pub fn try_update_bid(&self, bid: Bid){
@@ -345,9 +349,14 @@ impl Game{
 
                 // Reduce the purse of this player
                 if let Some(team) = self.teams.iter_mut().find(|t| t.player.username() == &player_username) {
-                    team.purse.spend(bid_price);
-                    // Add to bank
-                    self.bank += bid_price;
+                    if team.purse.cash() >= bid_price {
+                        team.purse.spend(bid_price);
+                        // Add to bank
+                        self.bank += bid_price;
+                    } else {
+                        // Player doesn't have enough money, skip this sale
+                        return Err("Player doesn't have enough money in purse".to_string());
+                    }
                 }
 
                 Ok((player_username, cricketer, bid_price))
@@ -369,9 +378,12 @@ impl Game{
         state_teams.remove(&username);
     }
 
-    pub fn award_winner(&self, mut winner: Player){
+    pub fn award_winner(&mut self, winner_username: &str){
         let winning_amount = get_winning_amount(&self);
-        winner.coins += winning_amount;
+        // Update the winner's coins in the teams
+        if let Some(team) = self.teams.iter_mut().find(|t| t.player.username() == winner_username) {
+            team.player.coins += winning_amount;
+        }
     }
 
     pub async fn is_bid_valid(&self, bid: &Bid) -> bool{

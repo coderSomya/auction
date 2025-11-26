@@ -1,17 +1,34 @@
-#[derive(Serialize, Deserialize)]
+use crate::game::Game;
+use crate::player::Player;
+use serde::{Serialize, Deserialize};
+
+pub mod random;
+pub mod ai;
+pub mod audience;
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Winner{
-    player: Player,
-    reason: String
+    pub player: Player,
+    pub reason: String
 }
 
-pub trait Evaluate{
-    pub async fn get_winner(game: GameState) -> Winner;
+#[async_trait::async_trait]
+pub trait Evaluate: Send + Sync {
+    async fn get_winner(&self, game: &Game) -> Winner;
 }
 
-pub struct Evaluator;
+pub struct Evaluator {
+    evaluator: Box<dyn Evaluate>,
+}
 
-impl Evaluator{
-    pub fn new() -> Self{
-        Self{}
+impl Evaluator {
+    pub fn new() -> Self {
+        Self {
+            evaluator: Box::new(random::Random),
+        }
+    }
+
+    pub async fn get_winner(&self, game: &Game) -> Winner {
+        self.evaluator.get_winner(game).await
     }
 }

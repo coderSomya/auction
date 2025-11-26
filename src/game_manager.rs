@@ -205,6 +205,24 @@ impl GameManager {
                 let mut cricketer_index = 0;
                 loop {
                     if cricketer_index >= cricketers.len() {
+                        // All cricketers exhausted, evaluate winner
+                        let (response_tx, mut response_rx) = mpsc::unbounded_channel();
+                        let _ = game_manager_tx.send(crate::game_manager::GameManagerMessage::EndGame {
+                            game_id: game_id_clone.clone(),
+                            response_tx,
+                        });
+                        
+                        // Wait for winner evaluation
+                        if let Some(Ok(winner)) = response_rx.recv().await {
+                            // Broadcast winner
+                            crate::ws::broadcast_to_room(&game_id_clone, "game_ended", &serde_json::json!({
+                                "game_id": game_id_clone,
+                                "winner": {
+                                    "username": winner.username(),
+                                    "coins": winner.coins
+                                }
+                            }));
+                        }
                         break;
                     }
 
@@ -398,7 +416,7 @@ impl GameManager {
     async fn end_game(&self, game_id: &str) -> Result<Player, String> {
         let mut games = self.games.lock().await;
         if let Some(game) = games.get_mut(game_id) {
-            let winner = game.end();
+            let winner = game.end().await;
             // Optionally remove the game from the map after ending
             // games.remove(game_id);
             Ok(winner)

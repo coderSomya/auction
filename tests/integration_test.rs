@@ -6,6 +6,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing_subscriber;
@@ -402,5 +403,436 @@ async fn test_multiple_cricketers_auction() {
     let data: Value = response.json().await.unwrap();
     assert_eq!(data["success"], true);
     println!("Multiple cricketers test completed");
+}
+
+#[tokio::test]
+async fn test_game_end_with_winner_evaluation() {
+    let (_server, base_url, ws_base_url) = start_test_server(3005).await;
+    wait_for_server(&base_url).await;
+
+    let client = Client::new();
+
+    println!("Test 5: Game end with winner evaluation when cricketers exhausted");
+
+    // Create game with 2 players
+    let game_id = create_game(&client, &base_url, "player1", 200).await;
+    join_game(&client, &base_url, &game_id, "player2", 200).await;
+    println!("Game created with 2 players");
+
+    // Connect WebSockets to collect messages
+    let uuid1 = uuid::Uuid::new_v4().to_string();
+    let uuid2 = uuid::Uuid::new_v4().to_string();
+
+    let messages_arc = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let messages_clone1 = Arc::clone(&messages_arc);
+    let messages_clone2 = Arc::clone(&messages_arc);
+
+    // Connect WebSocket for player1
+    let url1 = format!("{}/ws/{}/{}", ws_base_url, game_id, uuid1);
+    let (ws_stream1, _) = connect_async(url1).await.unwrap();
+    let (_write1, mut read1) = ws_stream1.split();
+    
+    tokio::spawn(async move {
+        while let Some(msg) = read1.next().await {
+            if let Ok(Message::Text(text)) = msg {
+                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                    messages_clone1.lock().await.push(value.clone());
+                    println!("WS1 Message: {}", serde_json::to_string_pretty(&value).unwrap());
+                }
+            }
+        }
+    });
+
+    // Connect WebSocket for player2
+    let url2 = format!("{}/ws/{}/{}", ws_base_url, game_id, uuid2);
+    let (ws_stream2, _) = connect_async(url2).await.unwrap();
+    let (_write2, mut read2) = ws_stream2.split();
+    
+    tokio::spawn(async move {
+        while let Some(msg) = read2.next().await {
+            if let Ok(Message::Text(text)) = msg {
+                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                    messages_clone2.lock().await.push(value.clone());
+                    println!("WS2 Message: {}", serde_json::to_string_pretty(&value).unwrap());
+                }
+            }
+        }
+    });
+
+    sleep(Duration::from_millis(200)).await;
+
+    // Start the game
+    start_game(&client, &base_url, &game_id).await;
+    println!("Game started - will process all cricketers");
+
+    // Get initial game info to check bank
+    let response = client
+        .get(format!("{}/api/games/{}", base_url, game_id))
+        .send()
+        .await
+        .unwrap();
+    let data: Value = response.json().await.unwrap();
+    let initial_bank = data["data"]["bank"].as_u64().unwrap_or(0);
+    println!("Initial bank: {}", initial_bank);
+
+    // Process cricketers by bidding and opting out quickly
+    // This will exhaust all cricketers and trigger winner evaluation
+    let mut cricketer_count = 0;
+    loop {
+        // Wait for cricketer to be available
+        sleep(Duration::from_secs(1)).await;
+
+        // Check if game has ended
+        let messages = messages_arc.lock().await;
+        let has_ended = messages.iter().any(|m| {
+            m.get("msg_type")
+                .and_then(|t| t.as_str())
+                .map(|t| t == "game_ended")
+                .unwrap_or(false)
+        });
+        drop(messages);
+
+        if has_ended {
+            println!("Game ended detected!");
+            break;
+        }
+
+        // Place a bid
+        place_bid(&client, &base_url, &game_id, "player1", 20 + cricketer_count as u64).await;
+        sleep(Duration::from_millis(300)).await;
+
+        // Opt out to trigger sale
+        opt_out(&client, &base_url, &game_id, "player2").await;
+        
+        cricketer_count += 1;
+        println!("Processed cricketer {} (waiting for next or game end)", cricketer_count);
+
+        // Wait a bit for sale to complete
+        sleep(Duration::from_secs(2)).await;
+
+        // Check again if game ended
+        let messages = messages_arc.lock().await;
+        let has_ended = messages.iter().any(|m| {
+            m.get("msg_type")
+                .and_then(|t| t.as_str())
+                .map(|t| t == "game_ended")
+                .unwrap_or(false)
+        });
+        drop(messages);
+
+        if has_ended {
+            println!("Game ended after processing {} cricketers", cricketer_count);
+            break;
+        }
+
+        // Safety check - if we've processed many cricketers, the game should have ended
+        if cricketer_count > 25 {
+            println!("Processed many cricketers, checking if game ended...");
+            break;
+        }
+    }
+
+    // Wait a bit more to ensure all messages are received
+    sleep(Duration::from_secs(3)).await;
+
+    // Verify game_ended message was broadcasted
+    let messages = messages_arc.lock().await;
+    let game_ended_messages: Vec<_> = messages
+        .iter()
+        .filter(|m| {
+            m.get("msg_type")
+                .and_then(|t| t.as_str())
+                .map(|t| t == "game_ended")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    assert!(!game_ended_messages.is_empty(), "Game ended message should be broadcasted to all players");
+    println!("Found {} game_ended messages", game_ended_messages.len());
+
+    // Verify winner information in the message
+    if let Some(ended_msg) = game_ended_messages.first() {
+        let payload = ended_msg.get("payload").unwrap();
+        assert!(payload.get("winner").is_some(), "Winner should be in game_ended message");
+        assert!(payload.get("winner")
+            .and_then(|w| w.get("username"))
+            .is_some(), "Winner username should be present");
+        assert!(payload.get("winner")
+            .and_then(|w| w.get("coins"))
+            .is_some(), "Winner coins should be present");
+        
+        let winner_username = payload.get("winner")
+            .and_then(|w| w.get("username"))
+            .and_then(|u| u.as_str())
+            .unwrap();
+        
+        let winner_coins = payload.get("winner")
+            .and_then(|w| w.get("coins"))
+            .and_then(|c| c.as_u64())
+            .unwrap();
+        
+        println!("Winner evaluated: {} with {} coins", winner_username, winner_coins);
+        
+        // Verify winner is one of the players
+        assert!(
+            winner_username == "player1" || winner_username == "player2",
+            "Winner should be one of the players"
+        );
+        
+        // Verify winner has coins (should have winning amount added)
+        assert!(winner_coins > 0, "Winner should have coins");
+    }
+
+    // Verify game status is FINISHED
+    let response = client
+        .get(format!("{}/api/games/{}", base_url, game_id))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let data: Value = response.json().await.unwrap();
+    assert_eq!(data["success"], true);
+    
+    let game_info = data["data"].as_object().unwrap();
+    let status = game_info["status"].as_str().unwrap();
+    assert_eq!(status, "FINISHED", "Game status should be FINISHED");
+    
+    let final_bank = game_info["bank"].as_u64().unwrap_or(0);
+    println!("Final bank: {}", final_bank);
+    
+    // Verify bank was updated (should have money from sales)
+    assert!(final_bank > initial_bank, "Bank should have increased from sales");
+    assert!(final_bank > 0, "Bank should be greater than 0");
+
+    println!("Game end test completed successfully!");
+    println!("- Winner was evaluated using random evaluator");
+    println!("- Winner was broadcasted to all players");
+    println!("- Bank was updated correctly");
+    println!("- Game status is FINISHED");
+}
+
+#[tokio::test]
+#[ignore] // Duplicate test - use test_game_end_with_winner_evaluation instead
+async fn test_winner_evaluation_when_cricketers_exhausted() {
+    let (_server, base_url, ws_base_url) = start_test_server(3010).await;
+    wait_for_server(&base_url).await;
+
+    let client = Client::new();
+
+    println!("Test 5: Winner evaluation when cricketers exhausted");
+
+    let game_id = create_game(&client, &base_url, "player1", 200).await;
+    join_game(&client, &base_url, &game_id, "player2", 200).await;
+    join_game(&client, &base_url, &game_id, "player3", 200).await;
+
+    println!("Created game with 3 players: {}", game_id);
+
+    // Connect WebSockets to capture events
+    let uuid1 = uuid::Uuid::new_v4().to_string();
+    let uuid2 = uuid::Uuid::new_v4().to_string();
+    let uuid3 = uuid::Uuid::new_v4().to_string();
+
+    // Collect WebSocket messages
+    let messages_arc = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let messages1 = Arc::clone(&messages_arc);
+    let messages2 = Arc::clone(&messages_arc);
+    let messages3 = Arc::clone(&messages_arc);
+
+    // Connect and collect messages for player1
+    let url1 = format!("{}/ws/{}/{}", ws_base_url, game_id, uuid1);
+    let (ws_stream1, _) = connect_async(url1).await.unwrap();
+    let (_write1, mut read1) = ws_stream1.split();
+    tokio::spawn(async move {
+        while let Some(msg) = read1.next().await {
+            if let Ok(Message::Text(text)) = msg {
+                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                    messages1.lock().await.push(value.clone());
+                    println!("Player1 WS: {}", serde_json::to_string_pretty(&value).unwrap());
+                }
+            }
+        }
+    });
+
+    // Connect and collect messages for player2
+    let url2 = format!("{}/ws/{}/{}", ws_base_url, game_id, uuid2);
+    let (ws_stream2, _) = connect_async(url2).await.unwrap();
+    let (_write2, mut read2) = ws_stream2.split();
+    tokio::spawn(async move {
+        while let Some(msg) = read2.next().await {
+            if let Ok(Message::Text(text)) = msg {
+                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                    messages2.lock().await.push(value.clone());
+                    println!("Player2 WS: {}", serde_json::to_string_pretty(&value).unwrap());
+                }
+            }
+        }
+    });
+
+    // Connect and collect messages for player3
+    let url3 = format!("{}/ws/{}/{}", ws_base_url, game_id, uuid3);
+    let (ws_stream3, _) = connect_async(url3).await.unwrap();
+    let (_write3, mut read3) = ws_stream3.split();
+    tokio::spawn(async move {
+        while let Some(msg) = read3.next().await {
+            if let Ok(Message::Text(text)) = msg {
+                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                    messages3.lock().await.push(value.clone());
+                    println!("Player3 WS: {}", serde_json::to_string_pretty(&value).unwrap());
+                }
+            }
+        }
+    });
+
+    sleep(Duration::from_millis(200)).await;
+
+    // Start the game
+    start_game(&client, &base_url, &game_id).await;
+    println!("Game started - will process all cricketers");
+
+    // Wait for first cricketer
+    sleep(Duration::from_secs(2)).await;
+
+    // Process cricketers quickly by bidding and opting out
+    // This will exhaust all cricketers faster
+    // We'll rotate players to avoid running out of money
+    let mut cricketer_count = 0;
+    let max_cricketers = 18; // We have 18 cricketers in the JSON
+    
+    // Process all cricketers
+    while cricketer_count < max_cricketers {
+        // Check if we've received a game_ended message
+        let messages = messages_arc.lock().await;
+        let has_ended = messages.iter().any(|m| {
+            m.get("msg_type")
+                .and_then(|t| t.as_str())
+                .map(|t| t == "game_ended")
+                .unwrap_or(false)
+        });
+        drop(messages);
+
+        if has_ended {
+            println!("Game ended detected after {} cricketers!", cricketer_count);
+            break;
+        }
+
+        // Rotate players to distribute bids and avoid running out of money
+        let bidder = match cricketer_count % 3 {
+            0 => "player1",
+            1 => "player2",
+            _ => "player3",
+        };
+
+        // Place a bid on current cricketer (use base price + small increment)
+        let bid_price = 18 + (cricketer_count % 5); // Keep bids reasonable
+        place_bid(&client, &base_url, &game_id, bidder, bid_price).await;
+        sleep(Duration::from_millis(300)).await;
+
+        // Opt out other players to trigger sale quickly
+        match bidder {
+            "player1" => {
+                opt_out(&client, &base_url, &game_id, "player2").await;
+                sleep(Duration::from_millis(200)).await;
+                opt_out(&client, &base_url, &game_id, "player3").await;
+            },
+            "player2" => {
+                opt_out(&client, &base_url, &game_id, "player1").await;
+                sleep(Duration::from_millis(200)).await;
+                opt_out(&client, &base_url, &game_id, "player3").await;
+            },
+            _ => {
+                opt_out(&client, &base_url, &game_id, "player1").await;
+                sleep(Duration::from_millis(200)).await;
+                opt_out(&client, &base_url, &game_id, "player2").await;
+            },
+        }
+
+        cricketer_count += 1;
+        println!("Processed cricketer {} by {} (waiting for next or game end)", cricketer_count, bidder);
+
+        // Wait for next cricketer or game end
+        sleep(Duration::from_secs(2)).await;
+    }
+    
+    // Wait a bit more to ensure game end is processed
+    sleep(Duration::from_secs(3)).await;
+    
+    // Final check for game end
+    let messages = messages_arc.lock().await;
+    let has_ended = messages.iter().any(|m| {
+        m.get("msg_type")
+            .and_then(|t| t.as_str())
+            .map(|t| t == "game_ended")
+            .unwrap_or(false)
+    });
+    drop(messages);
+    
+    if !has_ended {
+        // Give it one more chance
+        sleep(Duration::from_secs(2)).await;
+    }
+
+    // Wait a bit more for all messages
+    sleep(Duration::from_secs(2)).await;
+
+    // Verify winner was broadcasted
+    let messages = messages_arc.lock().await;
+    let game_ended_messages: Vec<_> = messages
+        .iter()
+        .filter(|m| {
+            m.get("msg_type")
+                .and_then(|t| t.as_str())
+                .map(|t| t == "game_ended")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    assert!(!game_ended_messages.is_empty(), "Game ended message should be broadcasted");
+    
+    if let Some(ended_msg) = game_ended_messages.first() {
+        let payload = ended_msg.get("payload").unwrap();
+        assert!(payload.get("winner").is_some(), "Winner should be in game_ended message");
+        assert!(payload.get("winner")
+            .and_then(|w| w.get("username"))
+            .is_some(), "Winner username should be present");
+        
+        let winner_username = payload.get("winner")
+            .and_then(|w| w.get("username"))
+            .and_then(|u| u.as_str())
+            .unwrap();
+        
+        println!("Winner evaluated: {}", winner_username);
+    }
+
+    // Verify game status is FINISHED
+    let response = client
+        .get(format!("{}/api/games/{}", base_url, game_id))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let data: Value = response.json().await.unwrap();
+    assert_eq!(data["success"], true);
+    
+    let game_info = data.get("data").unwrap();
+    let status = game_info.get("status").and_then(|s| s.as_str()).unwrap();
+    assert_eq!(status, "FINISHED", "Game status should be FINISHED");
+    
+    // Verify bank was updated (should be > 0 if any cricketers were sold)
+    let bank = game_info.get("bank").and_then(|b| b.as_u64()).unwrap();
+    assert!(bank > 0, "Bank should be greater than 0 if cricketers were sold");
+    
+    println!("Winner evaluation test completed successfully!");
+    println!("Game status: {}", status);
+    println!("Bank amount: {}", bank);
+    println!("Winner coins: {}", 
+        game_ended_messages.first()
+            .and_then(|m| m.get("payload"))
+            .and_then(|p| p.get("winner"))
+            .and_then(|w| w.get("coins"))
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0)
+    );
 }
 

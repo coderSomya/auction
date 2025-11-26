@@ -5,6 +5,7 @@ pub mod game_manager;
 pub mod utils;
 pub mod router;
 pub mod ws;
+pub mod evaluator;
 
 use axum::Router;
 use router::{create_router, AppState};

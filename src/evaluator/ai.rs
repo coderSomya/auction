@@ -1,20 +1,23 @@
+use crate::evaluator::{Evaluate, Winner};
+use crate::game::Game;
+
 pub struct Ai;
 
-
-impl Evaluate for Ai{
-    pub async fn get_winner(&self, game: GameState) -> Winner{
-        let prompt = "take this game state and return the result in the following format.
-        {
-        'winner': 'name of the player with the strongest team',
-        'reason': 'a description backing the choice'
+#[async_trait::async_trait]
+impl Evaluate for Ai {
+    async fn get_winner(&self, _game: &Game) -> Winner {
+        // TODO: Implement AI-based evaluation
+        // For now, return first player
+        let teams = _game.teams();
+        let player = if teams.is_empty() {
+            crate::player::Player::new("".to_string(), "".to_string(), "".to_string())
+        } else {
+            teams[0].player.clone()
+        };
+        
+        Winner {
+            player,
+            reason: "AI evaluation".to_string(),
         }
-        ";
-
-        let respose = self.query(prompt).await;
-        let Ok(winner) = serde_json::from_str::<Winner>(response) else{
-            panic!("wtf ai");
-        }
-
-        winner
     }
 }
