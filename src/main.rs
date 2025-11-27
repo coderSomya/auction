@@ -12,6 +12,7 @@ use router::{create_router, AppState};
 use std::net::SocketAddr;
 use tracing::{info, error};
 use tracing_subscriber;
+use tower_http::cors::{CorsLayer, Any};
 
 use game_manager::GameManager;
 
@@ -45,10 +46,16 @@ async fn main() {
     // Combine routers
     let app = Router::new()
         .merge(api_router)
-        .merge(ws_router);
+        .merge(ws_router)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        );
 
     // Start server
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 6969));
     info!("Server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();

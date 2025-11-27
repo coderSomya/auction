@@ -203,8 +203,13 @@ impl GameManager {
             // Start game loop in background
             tokio::spawn(async move {
                 let mut cricketer_index = 0;
+                let total_cricketers = cricketers.len();
+                tracing::info!("Starting game loop with {} cricketers", total_cricketers);
+                
                 loop {
-                    if cricketer_index >= cricketers.len() {
+                    // Check if all cricketers are exhausted BEFORE processing
+                    if cricketer_index >= total_cricketers {
+                        tracing::info!("All {} cricketers exhausted, evaluating winner", total_cricketers);
                         // All cricketers exhausted, evaluate winner
                         let (response_tx, mut response_rx) = mpsc::unbounded_channel();
                         let _ = game_manager_tx.send(crate::game_manager::GameManagerMessage::EndGame {
@@ -228,6 +233,7 @@ impl GameManager {
 
                     let cricketer = cricketers[cricketer_index].clone();
                     cricketer_index += 1;
+                    tracing::info!("Processing cricketer {}/{}: {}", cricketer_index, total_cricketers, cricketer.name);
 
                     // Set current cricketer and reset state
                     state.set_current_cricketer(Some(cricketer.clone())).await;
@@ -363,7 +369,7 @@ impl GameManager {
             let state = game.get_state();
             if let Some(cricketer) = state.get_current_cricketer().await {
                 game.send_bid_to_channel(player, cricketer.name, price)
-                    .map_err(|e| format!("Failed to send bid: {:?}", e))?;
+                .map_err(|e| format!("Failed to send bid: {:?}", e))?;
                 Ok(())
             } else {
                 Err("No cricketer currently being auctioned".to_string())

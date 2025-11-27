@@ -339,7 +339,7 @@ tracing_subscriber::fmt::init();
 let app = Router::new()
     .route("/ws/:room_id/:user_id", get(ws_handler));
 
-let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+let addr = SocketAddr::from(([127, 0, 0, 1], 6969));
 info!("listening on {}", addr);
 axum::Server::bind(&addr)
     .serve(app.into_make_service())

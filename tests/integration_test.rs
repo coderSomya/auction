@@ -52,17 +52,42 @@ async fn start_test_server(port: u16) -> (tokio::task::JoinHandle<()>, String, S
         axum::serve(listener, app).await.unwrap();
     });
 
+    // Give the server a moment to start
+    sleep(Duration::from_millis(100)).await;
+
     (handle, base_url, ws_base_url)
 }
 
 /// Helper to wait for server to be ready
 async fn wait_for_server(base_url: &str) {
     let client = Client::new();
-    for _ in 0..10 {
-        if client.get(format!("{}/api/games", base_url)).send().await.is_ok() {
-            return;
+    // Try up to 50 times (5 seconds total)
+    for i in 0..50 {
+        match client.get(format!("{}/api/games", base_url)).send().await {
+            Ok(response) if response.status().is_success() => {
+                return;
+            }
+            Ok(response) => {
+                // Server responded but with error status - might still be starting
+                // 404 could mean routes aren't registered yet, keep waiting
+                if i < 49 {
+                    sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                // Last attempt failed
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                panic!("Server not ready after 5 seconds: status={}, body={}", status, body);
+            }
+            Err(e) => {
+                // Connection error - server not up yet
+                if i < 49 {
+                    sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                panic!("Server did not become ready after 5 seconds: {:?}", e);
+            }
         }
-        sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -78,7 +103,12 @@ async fn create_game(client: &Client, base_url: &str, username: &str, initial_pu
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        panic!("Failed to create game: status={}, body={}", status, text);
+    }
+    
     let data: Value = response.json().await.unwrap();
     assert_eq!(data["success"], true);
     data["data"]["game_id"].as_str().unwrap().to_string()
@@ -525,15 +555,32 @@ async fn test_game_end_with_winner_evaluation() {
             break;
         }
 
-        // Safety check - if we've processed many cricketers, the game should have ended
-        if cricketer_count > 25 {
-            println!("Processed many cricketers, checking if game ended...");
+        // Safety check - if we've processed 18+ cricketers (max is 18), the game should have ended
+        // Wait longer for game_ended message to arrive
+        if cricketer_count >= 18 {
+            println!("Processed {} cricketers (max is 18), waiting for game end message...", cricketer_count);
+            // Wait up to 10 seconds for game_ended message
+            for wait_attempt in 0..10 {
+                sleep(Duration::from_secs(1)).await;
+                let messages = messages_arc.lock().await;
+                let has_ended = messages.iter().any(|m| {
+                    m.get("msg_type")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t == "game_ended")
+                        .unwrap_or(false)
+                });
+                drop(messages);
+                if has_ended {
+                    println!("Game ended detected after {} second wait", wait_attempt + 1);
+                    break;
+                }
+            }
             break;
         }
     }
 
     // Wait a bit more to ensure all messages are received
-    sleep(Duration::from_secs(3)).await;
+    sleep(Duration::from_secs(2)).await;
 
     // Verify game_ended message was broadcasted
     let messages = messages_arc.lock().await;

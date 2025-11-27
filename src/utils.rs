@@ -24,7 +24,7 @@ pub fn get_winning_amount(game: &Game) -> u64{
 }
 
 pub fn load_cricketers() -> Vec<Cricketer>{
-    let file = File::open("src/cricketers.json").unwrap();
+    let file = File::open("cricketers.json").unwrap();
     let reader = BufReader::new(file);
     let cricketers_data: CricketersData = serde_json::from_reader(reader).unwrap();
     
